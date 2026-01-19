@@ -6,8 +6,8 @@ import numpy as np
 import argparse
 import pyvirtualcam
 
-CAMERA_WIDTH = 1280
-CAMERA_HEIGHT = 960
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
 
 
 def parse_arguments():
