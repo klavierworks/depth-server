@@ -88,9 +88,9 @@ stereo.setOutputSize(640, 480)  # Set depth output size (must be multiple of 16)
 # Request RGB output (matching depth size)
 rgbOut = rgbCam.requestOutput((640, 480), type=dai.ImgFrame.Type.BGR888p)
 
-# Create output queues
-rgbQueue = rgbOut.createOutputQueue()
-depthQueue = stereo.depth.createOutputQueue()
+# Create output queues with smaller maxSize and non-blocking for lower latency
+rgbQueue = rgbOut.createOutputQueue(maxSize=1, blocking=False)
+depthQueue = stereo.depth.createOutputQueue(maxSize=1, blocking=False)
 
 print(f"Depth range (Z): {MIN_Z}mm ({MIN_Z/1000}m) to {MAX_Z}mm ({MAX_Z/1000}m)")
 print(f"X range: {MIN_X_PCT}% to {MAX_X_PCT}%")
@@ -114,18 +114,18 @@ try:
                 pipeline.start()
                 
                 while pipeline.isRunning():
-                    # Get RGB frame
-                    rgbFrame = rgbQueue.get()
+                    # Get RGB frame - use tryGet instead of get for non-blocking
+                    rgbFrame = rgbQueue.tryGet()
+                    if rgbFrame is None:
+                        continue
                     rgb = rgbFrame.getCvFrame()
                     
                     # Get depth frame
-                    depth = depthQueue.get()
+                    depth = depthQueue.tryGet()
+                    if depth is None:
+                        continue
                     assert isinstance(depth, dai.ImgFrame)
                     depthFrame = depth.getFrame()
-                    
-                    # Resize depth to match RGB if needed
-                    if depthFrame.shape[:2] != rgb.shape[:2]:
-                        depthFrame = cv2.resize(depthFrame, (rgb.shape[1], rgb.shape[0]))
                     
                     # Get frame dimensions
                     height, width = rgb.shape[:2]
@@ -225,18 +225,18 @@ try:
             pipeline.start()
             
             while pipeline.isRunning():
-                # Get RGB frame
-                rgbFrame = rgbQueue.get()
+                # Get RGB frame - use tryGet instead of get for non-blocking
+                rgbFrame = rgbQueue.tryGet()
+                if rgbFrame is None:
+                    continue
                 rgb = rgbFrame.getCvFrame()
                 
                 # Get depth frame
-                depth = depthQueue.get()
+                depth = depthQueue.tryGet()
+                if depth is None:
+                    continue
                 assert isinstance(depth, dai.ImgFrame)
                 depthFrame = depth.getFrame()
-                
-                # Resize depth to match RGB if needed
-                if depthFrame.shape[:2] != rgb.shape[:2]:
-                    depthFrame = cv2.resize(depthFrame, (rgb.shape[1], rgb.shape[0]))
                 
                 # Get frame dimensions
                 height, width = rgb.shape[:2]
