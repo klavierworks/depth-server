@@ -4,6 +4,7 @@ import cv2
 import depthai as dai
 import numpy as np
 import argparse
+import pyvirtualcam
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Display stereo depth map from Oak D camera')
@@ -21,6 +22,8 @@ parser.add_argument('--max_y', type=float, default=100.0,
                     help='Maximum Y coordinate as percentage 0-100, 100=bottom edge (default: 100)')
 parser.add_argument('--debug', action='store_true',
                     help='Show debug info and boundary lines on screen')
+parser.add_argument('--virtual-cam', action='store_true',
+                    help='Output to virtual webcam (requires pyvirtualcam)')
 args = parser.parse_args()
 
 # Depth range in millimeters
@@ -35,6 +38,9 @@ MAX_Y_PCT = args.max_y
 
 # Debug mode
 DEBUG = args.debug
+
+# Virtual webcam mode
+VIRTUAL_CAM = args.virtual_cam
 
 # Validate ranges
 if MIN_Z >= MAX_Z:
@@ -90,99 +96,237 @@ print(f"Depth range (Z): {MIN_Z}mm ({MIN_Z/1000}m) to {MAX_Z}mm ({MAX_Z/1000}m)"
 print(f"X range: {MIN_X_PCT}% to {MAX_X_PCT}%")
 print(f"Y range: {MIN_Y_PCT}% to {MAX_Y_PCT}%")
 print(f"Debug mode: {'ON' if DEBUG else 'OFF'}")
+print(f"Virtual webcam: {'ON' if VIRTUAL_CAM else 'OFF'}")
 print("Press 'q' to quit")
 
-# Start pipeline
-with pipeline:
-    pipeline.start()
-    
-    while pipeline.isRunning():
-        # Get RGB frame
-        rgbFrame = rgbQueue.get()
-        rgb = rgbFrame.getCvFrame()
-        
-        # Get depth frame
-        depth = depthQueue.get()
-        assert isinstance(depth, dai.ImgFrame)
-        depthFrame = depth.getFrame()
-        
-        # Resize depth to match RGB if needed
-        if depthFrame.shape[:2] != rgb.shape[:2]:
-            depthFrame = cv2.resize(depthFrame, (rgb.shape[1], rgb.shape[0]))
-        
-        # Get frame dimensions
-        height, width = rgb.shape[:2]
-        
-        # Convert percentage to pixel coordinates
-        MIN_X = int(width * MIN_X_PCT / 100.0)
-        MAX_X = int(width * MAX_X_PCT / 100.0)
-        MIN_Y = int(height * MIN_Y_PCT / 100.0)
-        MAX_Y = int(height * MAX_Y_PCT / 100.0)
-        
-        # Create depth mask (Z range)
-        depth_mask = (depthFrame >= MIN_Z) & (depthFrame <= MAX_Z)
-        
-        # Create spatial mask (X, Y range)
-        spatial_mask = np.zeros((height, width), dtype=bool)
-        spatial_mask[MIN_Y:MAX_Y, MIN_X:MAX_X] = True
-        
-        # Combine masks (must be within Z range AND within X,Y bounds)
-        combined_mask = depth_mask & spatial_mask
-        
-        # Apply mask to RGB frame (show only pixels within range)
-        maskedRgb = rgb.copy()
-        maskedRgb[~combined_mask] = [0, 0, 0]  # Black out pixels outside range
-        
-        # Debug visualization
-        if DEBUG:
-            # Draw boundary lines
-            # Vertical lines for X boundaries
-            cv2.line(maskedRgb, (MIN_X, 0), (MIN_X, height), (0, 255, 0), 2)
-            cv2.line(maskedRgb, (MAX_X, 0), (MAX_X, height), (0, 255, 0), 2)
-            
-            # Horizontal lines for Y boundaries
-            cv2.line(maskedRgb, (0, MIN_Y), (width, MIN_Y), (0, 255, 0), 2)
-            cv2.line(maskedRgb, (0, MAX_Y), (width, MAX_Y), (0, 255, 0), 2)
-            
-            # Draw debug text in bottom right corner
-            debug_text = [
-                f"Z: {MIN_Z}-{MAX_Z}mm",
-                f"X: {MIN_X_PCT:.1f}-{MAX_X_PCT:.1f}% ({MIN_X}-{MAX_X}px)",
-                f"Y: {MIN_Y_PCT:.1f}-{MAX_Y_PCT:.1f}% ({MIN_Y}-{MAX_Y}px)",
-            ]
-            
-            # Calculate text size and position (bottom right)
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.5
-            thickness = 1
-            line_height = 20
-            padding = 10
-            
-            y_offset = height - padding
-            for line in reversed(debug_text):
-                text_size = cv2.getTextSize(line, font, font_scale, thickness)[0]
-                x_pos = width - text_size[0] - padding
-                y_pos = y_offset
-                
-                # Draw background rectangle for text
-                cv2.rectangle(maskedRgb, 
-                            (x_pos - 5, y_pos - text_size[1] - 5),
-                            (x_pos + text_size[0] + 5, y_pos + 5),
-                            (0, 0, 0), -1)
-                
-                # Draw text
-                cv2.putText(maskedRgb, line, (x_pos, y_pos), 
-                           font, font_scale, (0, 255, 0), thickness)
-                
-                y_offset -= line_height
-        
-        # Display
-        cv2.imshow("Masked Video Feed", maskedRgb)
-        
-        # Break with 'q'
-        key = cv2.waitKey(1)
-        if key == ord('q'):
-            pipeline.stop()
-            break
+# Create colormap for depth visualization (used in debug mode)
+colorMap = cv2.applyColorMap(np.arange(256, dtype=np.uint8), cv2.COLORMAP_JET)
+colorMap[0] = [0, 0, 0]  # Make zero-depth pixels black
 
-cv2.destroyAllWindows()
+# Start pipeline with optional virtual camera
+cam_context = pyvirtualcam.Camera(width=640, height=480, fps=20) if VIRTUAL_CAM else None
+
+try:
+    if cam_context:
+        with cam_context as cam:
+            print(f"Virtual webcam started: {cam.device}")
+            with pipeline:
+                pipeline.start()
+                
+                while pipeline.isRunning():
+                    # Get RGB frame
+                    rgbFrame = rgbQueue.get()
+                    rgb = rgbFrame.getCvFrame()
+                    
+                    # Get depth frame
+                    depth = depthQueue.get()
+                    assert isinstance(depth, dai.ImgFrame)
+                    depthFrame = depth.getFrame()
+                    
+                    # Resize depth to match RGB if needed
+                    if depthFrame.shape[:2] != rgb.shape[:2]:
+                        depthFrame = cv2.resize(depthFrame, (rgb.shape[1], rgb.shape[0]))
+                    
+                    # Get frame dimensions
+                    height, width = rgb.shape[:2]
+                    
+                    # Convert percentage to pixel coordinates
+                    MIN_X = int(width * MIN_X_PCT / 100.0)
+                    MAX_X = int(width * MAX_X_PCT / 100.0)
+                    MIN_Y = int(height * MIN_Y_PCT / 100.0)
+                    MAX_Y = int(height * MAX_Y_PCT / 100.0)
+                    
+                    # Create depth mask (Z range)
+                    depth_mask = (depthFrame >= MIN_Z) & (depthFrame <= MAX_Z)
+                    
+                    # Create spatial mask (X, Y range)
+                    spatial_mask = np.zeros((height, width), dtype=bool)
+                    spatial_mask[MIN_Y:MAX_Y, MIN_X:MAX_X] = True
+                    
+                    # Combine masks (must be within Z range AND within X,Y bounds)
+                    combined_mask = depth_mask & spatial_mask
+                    
+                    # Apply mask to RGB frame
+                    maskedRgb = rgb.copy()
+                    
+                    if DEBUG:
+                        # In debug mode: show depth colormap for pixels in X/Y range but outside Z range
+                        out_of_z_range = spatial_mask & ~depth_mask
+                        
+                        # Normalize depth values for visualization (show up to 2x max range)
+                        depthClipped = np.clip(depthFrame, 0, MAX_Z * 2)
+                        depthNormalized = (depthClipped / (MAX_Z * 2) * 255).astype(np.uint8)
+                        colorizedDepth = cv2.applyColorMap(depthNormalized, colorMap)
+                        
+                        # Apply depth visualization to out-of-range pixels
+                        maskedRgb[out_of_z_range] = colorizedDepth[out_of_z_range]
+                        maskedRgb[~spatial_mask] = [0, 0, 0]  # Black for outside X/Y bounds
+                    else:
+                        # In normal mode: hide everything outside the combined mask
+                        maskedRgb[~combined_mask] = [0, 0, 0]  # Black out pixels outside range
+                    
+                    # Debug visualization
+                    if DEBUG:
+                        # Draw boundary lines
+                        # Vertical lines for X boundaries
+                        cv2.line(maskedRgb, (MIN_X, 0), (MIN_X, height), (0, 255, 0), 2)
+                        cv2.line(maskedRgb, (MAX_X, 0), (MAX_X, height), (0, 255, 0), 2)
+                        
+                        # Horizontal lines for Y boundaries
+                        cv2.line(maskedRgb, (0, MIN_Y), (width, MIN_Y), (0, 255, 0), 2)
+                        cv2.line(maskedRgb, (0, MAX_Y), (width, MAX_Y), (0, 255, 0), 2)
+                        
+                        # Draw debug text in bottom right corner
+                        debug_text = [
+                            f"Z: {MIN_Z}-{MAX_Z}mm",
+                            f"X: {MIN_X_PCT:.1f}-{MAX_X_PCT:.1f}% ({MIN_X}-{MAX_X}px)",
+                            f"Y: {MIN_Y_PCT:.1f}-{MAX_Y_PCT:.1f}% ({MIN_Y}-{MAX_Y}px)",
+                        ]
+                        
+                        # Calculate text size and position (bottom right)
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        font_scale = 0.5
+                        thickness = 1
+                        line_height = 20
+                        padding = 10
+                        
+                        y_offset = height - padding
+                        for line in reversed(debug_text):
+                            text_size = cv2.getTextSize(line, font, font_scale, thickness)[0]
+                            x_pos = width - text_size[0] - padding
+                            y_pos = y_offset
+                            
+                            # Draw background rectangle for text
+                            cv2.rectangle(maskedRgb, 
+                                        (x_pos - 5, y_pos - text_size[1] - 5),
+                                        (x_pos + text_size[0] + 5, y_pos + 5),
+                                        (0, 0, 0), -1)
+                            
+                            # Draw text
+                            cv2.putText(maskedRgb, line, (x_pos, y_pos), 
+                                      font, font_scale, (0, 255, 0), thickness)
+                            
+                            y_offset -= line_height
+                    
+                    # Send to virtual camera
+                    cam.send(cv2.cvtColor(maskedRgb, cv2.COLOR_BGR2RGB))
+                    
+                    # Display
+                    cv2.imshow("Masked Video Feed", maskedRgb)
+                    
+                    # Break with 'q'
+                    key = cv2.waitKey(1)
+                    if key == ord('q'):
+                        pipeline.stop()
+                        break
+    else:
+        # No virtual camera - just display
+        with pipeline:
+            pipeline.start()
+            
+            while pipeline.isRunning():
+                # Get RGB frame
+                rgbFrame = rgbQueue.get()
+                rgb = rgbFrame.getCvFrame()
+                
+                # Get depth frame
+                depth = depthQueue.get()
+                assert isinstance(depth, dai.ImgFrame)
+                depthFrame = depth.getFrame()
+                
+                # Resize depth to match RGB if needed
+                if depthFrame.shape[:2] != rgb.shape[:2]:
+                    depthFrame = cv2.resize(depthFrame, (rgb.shape[1], rgb.shape[0]))
+                
+                # Get frame dimensions
+                height, width = rgb.shape[:2]
+                
+                # Convert percentage to pixel coordinates
+                MIN_X = int(width * MIN_X_PCT / 100.0)
+                MAX_X = int(width * MAX_X_PCT / 100.0)
+                MIN_Y = int(height * MIN_Y_PCT / 100.0)
+                MAX_Y = int(height * MAX_Y_PCT / 100.0)
+                
+                # Create depth mask (Z range)
+                depth_mask = (depthFrame >= MIN_Z) & (depthFrame <= MAX_Z)
+                
+                # Create spatial mask (X, Y range)
+                spatial_mask = np.zeros((height, width), dtype=bool)
+                spatial_mask[MIN_Y:MAX_Y, MIN_X:MAX_X] = True
+                
+                # Combine masks (must be within Z range AND within X,Y bounds)
+                combined_mask = depth_mask & spatial_mask
+                
+                # Apply mask to RGB frame
+                maskedRgb = rgb.copy()
+                
+                if DEBUG:
+                    # In debug mode: show depth colormap for pixels in X/Y range but outside Z range
+                    out_of_z_range = spatial_mask & ~depth_mask
+                    
+                    # Normalize depth values for visualization (show up to 2x max range)
+                    depthClipped = np.clip(depthFrame, 0, MAX_Z * 2)
+                    depthNormalized = (depthClipped / (MAX_Z * 2) * 255).astype(np.uint8)
+                    colorizedDepth = cv2.applyColorMap(depthNormalized, colorMap)
+                    
+                    # Apply depth visualization to out-of-range pixels
+                    maskedRgb[out_of_z_range] = colorizedDepth[out_of_z_range]
+                    maskedRgb[~spatial_mask] = [0, 0, 0]  # Black for outside X/Y bounds
+                else:
+                    # In normal mode: hide everything outside the combined mask
+                    maskedRgb[~combined_mask] = [0, 0, 0]  # Black out pixels outside range
+                
+                # Debug visualization
+                if DEBUG:
+                    # Draw boundary lines
+                    # Vertical lines for X boundaries
+                    cv2.line(maskedRgb, (MIN_X, 0), (MIN_X, height), (0, 255, 0), 2)
+                    cv2.line(maskedRgb, (MAX_X, 0), (MAX_X, height), (0, 255, 0), 2)
+                    
+                    # Horizontal lines for Y boundaries
+                    cv2.line(maskedRgb, (0, MIN_Y), (width, MIN_Y), (0, 255, 0), 2)
+                    cv2.line(maskedRgb, (0, MAX_Y), (width, MAX_Y), (0, 255, 0), 2)
+                    
+                    # Draw debug text in bottom right corner
+                    debug_text = [
+                        f"Z: {MIN_Z}-{MAX_Z}mm",
+                        f"X: {MIN_X_PCT:.1f}-{MAX_X_PCT:.1f}% ({MIN_X}-{MAX_X}px)",
+                        f"Y: {MIN_Y_PCT:.1f}-{MAX_Y_PCT:.1f}% ({MIN_Y}-{MAX_Y}px)",
+                    ]
+                    
+                    # Calculate text size and position (bottom right)
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.5
+                    thickness = 1
+                    line_height = 20
+                    padding = 10
+                    
+                    y_offset = height - padding
+                    for line in reversed(debug_text):
+                        text_size = cv2.getTextSize(line, font, font_scale, thickness)[0]
+                        x_pos = width - text_size[0] - padding
+                        y_pos = y_offset
+                        
+                        # Draw background rectangle for text
+                        cv2.rectangle(maskedRgb, 
+                                    (x_pos - 5, y_pos - text_size[1] - 5),
+                                    (x_pos + text_size[0] + 5, y_pos + 5),
+                                    (0, 0, 0), -1)
+                        
+                        # Draw text
+                        cv2.putText(maskedRgb, line, (x_pos, y_pos), 
+                                  font, font_scale, (0, 255, 0), thickness)
+                        
+                        y_offset -= line_height
+                
+                # Display
+                cv2.imshow("Masked Video Feed", maskedRgb)
+                
+                # Break with 'q'
+                key = cv2.waitKey(1)
+                if key == ord('q'):
+                    pipeline.stop()
+                    break
+
+finally:
+    cv2.destroyAllWindows()
